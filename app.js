@@ -9,7 +9,8 @@ const state = {
   query: "",
   selectedPhotos: [],
   onlineUrl: "",
-  loadingOnline: false
+  loadingOnline: false,
+  editingRecordId: null
 };
 
 const els = {
@@ -19,6 +20,7 @@ const els = {
   monthInput: document.querySelector("#monthInput"),
   dateInput: document.querySelector("#dateInput"),
   photoInput: document.querySelector("#photoInput"),
+  photoDrop: document.querySelector(".photo-drop"),
   photoPreview: document.querySelector("#photoPreview"),
   notesInput: document.querySelector("#notesInput"),
   saveBtn: document.querySelector("#saveBtn"),
@@ -64,6 +66,12 @@ function init() {
 function bindEvents() {
   els.form.addEventListener("submit", handleSubmit);
   els.photoInput.addEventListener("change", handlePhotoSelect);
+  els.photoPreview.addEventListener("click", handlePhotoPreviewClick);
+  els.photoDrop.addEventListener("dragover", handlePhotoDragOver);
+  els.photoDrop.addEventListener("dragenter", handlePhotoDragOver);
+  els.photoDrop.addEventListener("dragleave", handlePhotoDragLeave);
+  els.photoDrop.addEventListener("drop", handlePhotoDrop);
+  els.recordsTable.addEventListener("click", handleRecordTableClick);
   els.searchInput.addEventListener("input", (event) => {
     state.query = event.target.value.trim().toLowerCase();
     renderTable();
@@ -150,27 +158,97 @@ function replaceWithOnlineRecords(records) {
 
 async function handlePhotoSelect() {
   const files = Array.from(els.photoInput.files || []);
-  state.selectedPhotos = await Promise.all(files.map(fileToPhoto));
+  await addPhotos(files);
+}
+
+function handlePhotoDragOver(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  els.photoDrop.classList.add("is-dragging");
+}
+
+function handlePhotoDragLeave(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  els.photoDrop.classList.remove("is-dragging");
+}
+
+async function handlePhotoDrop(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  els.photoDrop.classList.remove("is-dragging");
+
+  const files = Array.from(event.dataTransfer?.files || []);
+  await addPhotos(files);
+}
+
+async function addPhotos(files) {
+  const validFiles = files.filter((file) => file && file.type && file.type.startsWith("image/"));
+  if (!validFiles.length) {
+    return;
+  }
+
+  const newPhotos = await Promise.all(validFiles.map(fileToPhoto));
+  const merged = uniquePhotos([...state.selectedPhotos, ...newPhotos]);
+  const duplicates = [...state.selectedPhotos, ...newPhotos].length - merged.length;
+
+  state.selectedPhotos = merged;
+  syncPhotoInputFiles(validFiles);
+
+  if (duplicates > 0) {
+    showToast("Se omitieron fotos duplicadas del mismo turno y fecha.", "warning");
+  }
+
   renderPhotoPreview();
+}
+
+function syncPhotoInputFiles(newFiles) {
+  if (typeof DataTransfer === "undefined") {
+    els.photoInput.value = "";
+    return;
+  }
+
+  const dataTransfer = new DataTransfer();
+  const currentFiles = Array.from(els.photoInput.files || []);
+  currentFiles.forEach((file) => dataTransfer.items.add(file));
+  newFiles.forEach((file) => dataTransfer.items.add(file));
+  els.photoInput.files = dataTransfer.files;
 }
 
 async function handleSubmit(event) {
   event.preventDefault();
 
-  if (!state.selectedPhotos.length) {
-    showStatus("warning", "Falta evidencia fotografica", "Adjunta al menos una foto para poder guardar el turno en el Excel en linea.");
+  const date = els.dateInput.value;
+  const shift = document.querySelector("input[name='shift']:checked").value;
+  const existingSignatures = new Set(
+    state.records
+      .filter((record) => (
+        record.date === date &&
+        record.shift === shift &&
+        record.id !== state.editingRecordId
+      ))
+      .flatMap((record) => getPhotos(record).map((photo) => photoSignature(photo)))
+  );
+
+  const filteredPhotos = uniquePhotos(
+    state.selectedPhotos.filter((photo) => !existingSignatures.has(photoSignature(photo)))
+  );
+  const duplicateCount = state.selectedPhotos.length - filteredPhotos.length;
+
+  if (!filteredPhotos.length) {
+    const message = duplicateCount > 0
+      ? "Ya existe esa foto para este día y turno. Elige otra o cambia la fecha."
+      : "Adjunta al menos una foto para poder guardar el turno en el Excel en linea.";
+    showStatus("warning", "Falta evidencia fotografica", message);
     return;
   }
 
-  const date = els.dateInput.value;
-  const shift = document.querySelector("input[name='shift']:checked").value;
-  const record = {
-    id: crypto.randomUUID(),
+  const payload = {
     date,
     month: els.monthInput.value || date.slice(0, 7),
     shift,
     workCenter: els.workCenter.value.trim() || "PEAJE FRAGUA",
-    photos: state.selectedPhotos.map((photo, index) => ({
+    photos: filteredPhotos.map((photo, index) => ({
       ...photo,
       name: buildPhotoName(photo.name, date, shift, index + 1)
     })),
@@ -178,13 +256,33 @@ async function handleSubmit(event) {
     syncedAt: ""
   };
 
-  state.records.unshift(record);
+  if (duplicateCount > 0) {
+    showToast("Se omitieron fotos duplicadas para este día y turno.", "warning");
+  }
+
+  let recordsToSync = [];
+
+  if (state.editingRecordId) {
+    const targetId = state.editingRecordId;
+    state.records = state.records.map((record) =>
+      record.id === targetId ? { ...record, ...payload, id: record.id } : record
+    );
+    recordsToSync = state.records.filter((record) => record.id === targetId);
+    showToast("Registro actualizado.", "success");
+  } else {
+    const newRecord = { id: crypto.randomUUID(), ...payload };
+    state.records.unshift(newRecord);
+    recordsToSync = [newRecord];
+    showToast("Registro guardado.", "success");
+  }
+
+  state.editingRecordId = null;
   state.selectedPhotos = [];
   els.photoInput.value = "";
   els.notesInput.value = "";
   render();
   renderPhotoPreview();
-  await syncRecords([record]);
+  await syncRecords(recordsToSync);
 }
 
 function render() {
@@ -332,6 +430,12 @@ function renderTable() {
       <td>${renderPhotoThumbs(record)}</td>
       <td>${renderPhotoLinks(record)}</td>
       <td>${escapeHtml(record.notes || "-")}</td>
+      <td>
+        <div class="table-actions">
+          <button type="button" class="btn btn-sm btn-outline-primary" data-action="edit-record" data-id="${record.id}">Editar</button>
+          <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete-record" data-id="${record.id}">Eliminar</button>
+        </div>
+      </td>
     </tr>
   `).join("");
 }
@@ -342,10 +446,11 @@ function renderPhotoPreview() {
     return;
   }
 
-  els.photoPreview.innerHTML = state.selectedPhotos.map((photo) => `
+  els.photoPreview.innerHTML = state.selectedPhotos.map((photo, index) => `
     <figure>
-      <img src="${photo.dataUrl}" alt="${escapeHtml(photo.name)}">
+      <img src="${photo.dataUrl || getPhotoDisplaySrc(photo)}" alt="${escapeHtml(photo.name)}">
       <figcaption>${escapeHtml(photo.name)}</figcaption>
+      <button type="button" class="btn btn-sm btn-outline-danger remove-photo-btn" data-remove-photo="${index}">Quitar</button>
     </figure>
   `).join("");
 }
@@ -362,6 +467,54 @@ function renderPhotoThumbs(record) {
     }
     return `<span class="thumb-empty"><i class="bi bi-image"></i></span>`;
   }).join("")}</div>`;
+}
+
+function handleRecordTableClick(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+
+  const { action, id } = button.dataset;
+  if (!id) return;
+
+  if (action === "delete-record") {
+    const record = state.records.find((item) => item.id === id);
+    if (!record) return;
+    if (!window.confirm("¿Seguro que deseas eliminar este registro y sus fotos?")) return;
+    state.records = state.records.filter((item) => item.id !== id);
+    render();
+    return;
+  }
+
+  if (action === "edit-record") {
+    const record = state.records.find((item) => item.id === id);
+    if (!record) return;
+    state.editingRecordId = record.id;
+    els.dateInput.value = record.date;
+    els.workCenter.value = record.workCenter || "PEAJE FRAGUA";
+    els.notesInput.value = record.notes || "";
+    state.selectedPhotos = getPhotos(record).map((photo) => ({
+      ...photo,
+      dataUrl: photo.dataUrl || getPhotoDisplaySrc(photo),
+      name: photo.name || `foto-${record.date}`
+    }));
+
+    const shiftRadio = document.querySelector(`input[name='shift'][value='${record.shift}']`);
+    if (shiftRadio) shiftRadio.checked = true;
+
+    renderPhotoPreview();
+    showToast("Registro cargado para editar. Guarda para aplicar los cambios.", "info");
+  }
+}
+
+function handlePhotoPreviewClick(event) {
+  const button = event.target.closest("button[data-remove-photo]");
+  if (!button) return;
+
+  const index = Number(button.dataset.removePhoto);
+  if (Number.isNaN(index)) return;
+
+  state.selectedPhotos = state.selectedPhotos.filter((_, photoIndex) => photoIndex !== index);
+  renderPhotoPreview();
 }
 
 function renderPhotoLinks(record) {
@@ -968,6 +1121,23 @@ function getLogoDataUrl() {
 
 function buildPhotoName(originalName, date, shift, index) {
   return `pausa-activa_${date}_turno-${shift}_${String(index).padStart(2, "0")}.jpg`;
+}
+
+function uniquePhotos(photos) {
+  const seen = new Set();
+  return photos.filter((photo) => {
+    const signature = photoSignature(photo);
+    if (!signature || seen.has(signature)) {
+      return false;
+    }
+    seen.add(signature);
+    return true;
+  });
+}
+
+function photoSignature(photo) {
+  const raw = photo?.dataUrl || photo?.url || photo?.name || "";
+  return String(raw || "").trim();
 }
 
 function getPhotos(record) {

@@ -170,10 +170,12 @@ body {
   transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
 }
 
-.photo-drop:hover {
+.photo-drop:hover,
+.photo-drop.is-dragging {
   border-color: var(--primary-2);
   background: #e8eef9;
   transform: translateY(-1px);
+  box-shadow: inset 0 0 0 2px rgba(53, 100, 166, 0.18);
 }
 
 .photo-drop i {
