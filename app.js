@@ -111,9 +111,32 @@ async function refreshOnlineHistory(options = {}) {
 async function getOnlineRecords() {
   try {
     const response = await fetch(`${APPS_SCRIPT_URL}?mode=records`, { method: "GET", mode: "cors" });
-    return response.json();
+    return await parseAppsScriptJson(response, "historial");
   } catch {
     return getOnlineRecordsJsonp();
+  }
+}
+
+async function parseAppsScriptJson(response, label) {
+  const text = await response.text();
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    throw new Error(`La respuesta del Excel en linea para ${label} está vacía.`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  const looksLikeJson = trimmed.startsWith("{") || trimmed.startsWith("[") || contentType.includes("application/json");
+
+  if (!looksLikeJson) {
+    const preview = trimmed.slice(0, 140).replace(/\s+/g, " ");
+    throw new Error(`La URL del Excel en linea devolvió HTML en lugar de JSON (${preview}). Revisa que el Apps Script esté publicado y activo.`);
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    throw new Error(`No se pudo leer la respuesta JSON del Excel en linea para ${label}.`);
   }
 }
 
@@ -578,7 +601,7 @@ async function postToAppsScript(scriptUrl, records) {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: payload
     });
-    const result = await response.json();
+    const result = await parseAppsScriptJson(response, "guardado");
     if (!result.ok) {
       const appError = new Error(result.error || "No se pudo sincronizar.");
       appError.appError = true;
